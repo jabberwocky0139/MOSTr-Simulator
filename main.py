@@ -207,8 +207,8 @@ class Inverter(object):
         self.wire1.joint('Drain', self.nmos1)
         self.wire1.joint('Drain', self.pmos1)
 
-    def process(self, mos, name, param):
-        mos_obj = self.nmos1 if name == 'nMOS' else self.pmos1
+    def process(self, mos='nMOS', name='L', param=1):
+        mos_obj = self.nmos1 if mos == 'nMOS' else self.pmos1
         mos_obj.__dict__[name] = param
 
         for Vin in self.Vin_arr:
