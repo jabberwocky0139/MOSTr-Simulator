@@ -3,12 +3,14 @@
 # ・負の Vgs/Vds にも対応
 #   ▶ とりあえず、Vs は Vd よりも大きくならないという仮定を入れることにする(nMOSの場合)
 #     FreeWireにもその仮定を実装することにする
+#   ▶ 完了
 
 # ・FreeWireの実装．最適化ソルバー
 #   ▶ 完了
 
 # ・FreeWireとMOSの連携
 #   ▶ 現状mainにぶん投げ. Interfaceクラスを作る
+#   ▶ 完了
 
 # ・FreeWire: generate_constraintsの改善
 #   ▶ 不要
@@ -18,86 +20,45 @@
 
 # ・FreeWire: Gate接続時の振る舞い
 
+# ・FreeWire: もっと簡潔に
+
 import matplotlib.pyplot as plt
-import math as m
 import numpy as np
 from scipy import optimize
 from abc import ABCMeta, abstractmethod
 
 
-class VgdsProperty(metaclass=ABCMeta):
-    # Vg/Vd/Vsに関するpropertyを定義
-    # 代入が行われたときにVgs/Vdsを再計算する
-    def __init__(self):
-        self._Vg, self._Vd, self._Vs, self._Vgs, self._Vds = [0] * 5
-
-    def calc(self):
-        # pMOSのことも考慮して絶対値を取る
-        self._Vgs = abs(self._Vg - self._Vs)
-        self._Vds = abs(self._Vd - self._Vs)
-
-    @property
-    def Vg(self):
-        return self._Vg
-
-    @Vg.setter
-    def Vg(self, Vg):
-        self._Vg = Vg
-        self.calc()
-
-    @property
-    def Vd(self):
-        return self._Vd
-
-    @Vd.setter
-    def Vd(self, Vd):
-        self._Vd = Vd
-        self.calc()
-
-    @property
-    def Vs(self):
-        return self._Vs
-
-    @Vs.setter
-    def Vs(self, Vs):
-        self._Vs = Vs
-        self.calc()
-
-    @property
-    def Vgs(self):
-        # Vgs/Vdsはgetterのみ定義(setterに例外入れてもいいんだけど、、、)
-        return self._Vgs
-
-    @property
-    def Vds(self):
-        # Vgs/Vdsはgetterのみ定義
-        return self._Vds
-
-
-class MOS(VgdsProperty):
+class MOS(metaclass=ABCMeta):
     # 動作中にDとSが反転するようなことはないと仮定(Vd > Vs)
     def __init__(self, unit='unknown', L=1, W=1, mu=1, Cox=1, lmd=0, Vth=0.5):
-        super().__init__()
+        self.Vg, self.Vd, self.Vs = 0, 0, 0
+        self._Vgs, self._Vds = 0, 0
         self.L, self.W = L, W  # チャネル長 / 幅
         self.mu = mu  # キャリアの移動度
         self.Cox = Cox  # ゲート酸化膜容量
         self.lmd = lmd  # チャネル長変調．線形-非線形領域の接続を考慮して、とりあえず無視
         self.Vth = Vth  # しきい値
-        self.beta = self.W / self.L * self.mu * self.Cox
+        self._beta = self.W / self.L * self.mu * self.Cox
         self.Id = 0  # 正ならD→S方向, 負ならS→D方向
         self.unit = unit  # インスタンス名
 
-    def __call__(self, name, value):
-        # --*-- 混乱を招く恐れがあるので未使用 --*--
-        # 電圧設定. インスタンスを関数っぽく呼ぶと各ゲートの電圧設定が可
-        # Vg/Vd/Vs を設定すると、同時に Vds/Vgs を再設定
-        # pMOSでもVgs/dsを正で保持
-        if name in ('Vg', 'Vd', 'Vs'):
-            self.__dict__['_' + name] = value
-            self.__dict__['Vds'] = abs(self._Vs - self._Vd)
-            self.__dict__['Vgs'] = abs(self._Vs - self._Vg)
-        else:
-            raise NameError('Invalid name!')
+    @property
+    def Vgs(self):
+        # Vgs参照時に算出
+        self._Vgs = abs(self.Vg - self.Vs)
+        return self._Vgs
+
+    @property
+    def Vds(self):
+        # Vds参照時に算出
+        self._Vds = abs(self.Vd - self.Vs)
+        return self._Vds
+
+    @property
+    def beta(self):
+        # beta参照時に算出
+        self._beta = self.W / self.L * self.mu * self.Cox
+        return self._beta
 
     @abstractmethod
     def exception(self):
@@ -162,6 +123,11 @@ class FreeWire(object):
 
     def __call__(self, name, instance):
         # Gate/Source/Drain端子と接続
+        # jointのシンタックスシュガー
+        self.joint(name, instance)
+
+    def joint(self, name, instance):
+        # Gate/Source/Drain端子と接続
         self.__dict__[name].append(instance)
 
     def current_law(self, voltage):
@@ -221,41 +187,50 @@ class FreeWire(object):
             self.voltage = optimize.brentq(self.current_law, a, b)
 
 
-# FixedWire
-Vdd, GND = 3, 0
-output_arr = []
-output_i_arr = []
-Vin_arr = np.linspace(0, 3, 1000)
-for L in [0.5, 1, 1.5, 2.0, 10]:
-    for Vin in Vin_arr:
-        # 初期条件
-        nmos1 = nMOS(unit=1)
-        # nmos1('Vs', GND)
-        # nmos1('Vg', Vin)
-        nmos1.Vs = GND
-        nmos1.Vg = Vin
+class Inverter(object):
+    def __init__(self, mos, name, param):
+        self.Vdd, self.GND = 3, 0
+        self.Vin_arr = np.linspace(0, 3, 1000)
+        self.Vout_arr = []  # 動かすパラメータごとに保持
+        self.Ileak_arr = []  # 動かすパラメータごとに保持
+        self.nmos1 = nMOS(unit=1)
+        self.pmos1 = pMOS(unit=1)
+        self.wire1 = FreeWire()
 
-        pmos1 = pMOS(unit=1, L=L)
-        # pmos1('Vs', VDD)
-        # pmos1('Vg', Vin)
-        pmos1.Vs = Vdd
-        pmos1.Vg = Vin
+        self.create_circuit()
+        self.process(mos=mos, name=name, param=param)
 
-        # Wire接続
-        wire = FreeWire()
-        wire('Drain', nmos1)
-        wire('Drain', pmos1)
+    def create_circuit(self):
+        # FixedWireとの接続．回路を規定する
+        self.nmos1.Vs = self.GND
+        self.pmos1.Vs = self.Vdd
+        self.wire1.joint('Drain', self.nmos1)
+        self.wire1.joint('Drain', self.pmos1)
 
-        wire.optimisation()
-        output_arr.append(wire.voltage)
-        output_i_arr.append(wire.current)
+    def process(self, mos, name, param):
+        mos_obj = self.nmos1 if name == 'nMOS' else self.pmos1
+        mos_obj.__dict__[name] = param
 
-    plt.plot(Vin_arr, output_arr, label='Vout: L={0}'.format(L))
-    plt.plot(Vin_arr, output_i_arr, label='Ileak: L={0}'.format(L))
-    output_arr = []
-    output_i_arr = []
+        for Vin in self.Vin_arr:
+            self.nmos1.Vg = Vin
+            self.pmos1.Vg = Vin
+            self.wire1.optimisation()
+            self.Vout_arr.append(self.wire1.voltage)
+            self.Ileak_arr.append(self.wire1.current)
 
-plt.xlabel(r'$V_{in}$', fontsize=18)
-plt.ylabel(r'$V_{out}\ /\ I_{leak}$', fontsize=18)
-plt.legend()
-plt.show()
+        plt.plot(self.Vin_arr, self.Vout_arr,
+                 label='Vout: {0} {1}={2}'.format(
+                     mos_obj.__class__.__name__, name, param))
+        plt.plot(self.Vin_arr, self.Ileak_arr,
+                 label='Ileak: {0} {1}={2}'.format(
+                     mos_obj.__class__.__name__, name, param))
+
+
+if __name__ == '__main__':
+    for L in (0.5, 1, 1.5, 2.0, 10):
+        Inverter('pMOS', 'L', L)
+
+    plt.xlabel(r'$V_{in}$', fontsize=18)
+    plt.ylabel(r'$V_{out}\ /\ I_{leak}$', fontsize=18)
+    plt.legend()
+    plt.show()
